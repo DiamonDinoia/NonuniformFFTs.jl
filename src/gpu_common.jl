@@ -49,10 +49,13 @@ gpu_shmem_ndrange_from_groupsize(groupsize::Integer, ngroups::Tuple) =
     )
 
     # (3) Determine local grid size based on above values
+    # how much smem is left after subtracting the memory for each point in the batch 
     max_shmem_localgrid = max_shmem - const_shmem - Np_min * shmem_per_point  # maximum shared memory for local grid (single block)
     max_localgrid_length = max_shmem_localgrid ÷ sizeof(Z)  # maximum number of elements in a block
+    # m  = floor(Int, pow(max_localgrid_length, 1/D)), number of elements per direction
     m = floor(Int, _invpow(max_localgrid_length, Val(D)))  # local grid size in each direction (including ghost cells / padding)
-    n = m - (2M - 1)  # exclude ghost cells
+    # include the padding
+    n = m - (2M - 1)  # exclude ghost cells padding
     block_dims = ntuple(_ -> n, Val(D))  # = (n, n, ...)
 
     if warn
@@ -90,7 +93,7 @@ gpu_shmem_ndrange_from_groupsize(groupsize::Integer, ngroups::Tuple) =
     # shmem_for_local_grid = m^D * sizeof(Z)
     # required_shmem = const_shmem + shmem_for_local_grid + Np_actual * shmem_per_point
     # @show required_shmem max_shmem
-
+    # it does not include the padding
     block_dims, Np_actual
 end
 

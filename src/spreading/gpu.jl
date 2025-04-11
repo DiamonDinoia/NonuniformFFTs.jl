@@ -229,12 +229,12 @@ end
 # while parallelising some operations across up to Np points.
 # TODO: Should Np be equal to the number of threads? or how to choose it optimally so that the block size stays not too small?
 @kernel function spread_from_points_shmem_kernel!(
-        us::NTuple{C, AbstractArray{T}},
-        @Const(gs::NTuple{D}),
-        @Const(evalmode::EvaluationMode),
-        @Const(points::NTuple{D}),
-        @Const(vp::NTuple{C, AbstractVector{Z}}),
-        @Const(pointperm),
+        us::NTuple{C, AbstractArray{T}}, # output array in global memory
+        @Const(gs::NTuple{D}), # kernel (kaiser bessel)
+        @Const(evalmode::EvaluationMode), # horner/direct
+        @Const(points::NTuple{D}), # number of points
+        @Const(vp::NTuple{C, AbstractVector{Z}}), # points array
+        @Const(pointperm), # index array of sorted points
         @Const(cumulative_npoints_per_block::AbstractVector),
         ::HalfSupport{M},
         ::Val{block_dims},
@@ -261,13 +261,15 @@ end
     threadidx = @index(Local, Linear)    # in 1:nthreads
 
     # Allocate static shared memory
-    u_local = @localmem(Z, shmem_size)
+    # dimensions + padding
+    u_local = @localmem(Z, shmem_size) # same as SM bin size + padding
     # @assert shmem_size == block_dims .+ (2M - 1)
     @assert T <: Real
 
-    window_vals = @localmem(T, (2M, D, Np))
-    inds_start = @localmem(Int, (D, Np))
-    vp_sm = @localmem(Z, Np)  # input values copied to shared memory
+    # Np is the batch_size, I need to know it because shared memory need to be preallocated
+    window_vals = @localmem(T, (2M, D, Np)) # values of the kernel functions are in shared memory, ns, dim, batch_size
+    inds_start = @localmem(Int, (D, Np)) # coordinate of the point the local subgrid
+    vp_sm = @localmem(Z, Np)  # input values copied to shared memory (why?)
 
     # Buffer for indices and lengths.
     # This is needed in CPU version (used in tests), to avoid variables from being
@@ -301,28 +303,55 @@ end
         # non-uniform points which would require atomics.
 
         # The first batch deals with points (a + 1):min(a + Np, b)
+        # indexes of the points in the input array 
+        # all threads start at the same point
+        # for (batch_begin = buf_sm[1]; batch_begin < buf_sm[2] - 1; batch_begin+=Np)
+        # outer for loop over all the points in this subproblem incremented by Np
+        # inner for loop over batch_size which is Np or less
         @inbounds for batch_begin in buf_sm[1]:Np:(buf_sm[2] - 1)
+            # compute the number elements in this batch (in case this is the end...)
             @uniform batch_size = min(Np, buf_sm[2] - batch_begin)  # current batch size
-
             # (1) Evaluate window functions around each non-uniform point.
             inds = CartesianIndices((1:batch_size, 1:D))  # parallelise over dimensions + points
+            # this for loop iterates over dimensions and points
+            # threadidx index of the threads, nthreads is the number of threads 
+            # for loop (i=threadidx; i < len(idx); i+=nthreads) # this is equivalent to two nested for loops one over D the other over batch_size
             @inbounds for n in threadidx:nthreads:length(inds)
+                # p index of the point whithin the batch and d the dimension
+                # location in the batch , d is dimension
                 p, d = Tuple(inds[n])
+                # threadidx.x + start of the batch
                 local i = batch_begin + p  # index of non-uniform point
                 local j = if pointperm === nothing
                     i
                 else
                     @inbounds pointperm[i]
-                end
+                end 
+                # g is a kernel 
                 g = gs[d]
+                # in the output grid 
                 x = transform_fold(points[d][j])
-                vp_sm[p] = vp[c][j]
+                # ignore c
+                vp_sm[p] = vp[c][j] # copies the strength to shared_memory 
+                # after this all threads have access to all the strenghts in shared memory
+                # evaluate_kernel computes all spreading window in one go
+                # on cuda not horner is better (?) evaluating the bessel function seems faster than horner
                 gdata = Kernels.evaluate_kernel(evalmode, g, x)
                 ishift = ishifts_sm[d]
+                # gdata.i is the coordinate of the point on the global grid
+                # basically is x + j for j in -M +M
+                # this is the index of this particular point in the local grid 
+                # writes the coordinate to the shared memory array
                 inds_start[d, p] = gdata.i - ishift
                 local vals = gdata.values
                 for m ∈ eachindex(vals)
-                    window_vals[m, d, p] = vals[m]
+                    # copies the values to share memory
+                    # for m in 2:2M:
+                    # d is the dimension
+                    # p index of the point whithin the batch
+                    # here we are not convolving with the strength 
+                    window_vals[m, d, p] = vals[m] # saves the kernel evaluation here
+                    # we can convolve by the strenght so we do not need vp_sm
                 end
             end
 
@@ -330,12 +359,18 @@ end
 
             # (2) All threads spread together onto shared memory, avoiding all collisions
             # and thus not requiring atomic operations.
+            # now we change parrallelism 
             @inbounds for p in 1:batch_size
+                # coordinate of the current point in the local grid
                 local istart = ntuple(d -> @inbounds(inds_start[d, p]), Val(D))
+                # strength 
                 local v = vp_sm[p]
+                # pointer to all the kernel evaluation whithin this point
                 window_vals_p = @view window_vals[:, :, p]
+                # ! writing onto the input
                 spread_onto_array_shmem_threads!(u_local, istart, window_vals_p, v; threadidx, nthreads)
                 @synchronize  # make sure threads don't write concurrently to the same place (since we don't use atomics)
+                # important to synchronise
             end
         end
 
@@ -364,16 +399,29 @@ end
         v::Z;
         threadidx, nthreads,
     ) where {T, D, Z}
+    # axes(window_vals, 1) is 1:2M — the index range of the first dimension.
+    # ntuple(_ -> axes(window_vals, 1), Val(D)) creates a tuple with D copies of 1:2M.
+    # CartesianIndices(...)  then produces a D-dimensional grid over shape (2M, D).
+    # Cartesian product (2M, D)
     inds = CartesianIndices(ntuple(_ -> axes(window_vals, 1), Val(D)))  # = (1:2M, 1:2M, ...)
     Tr = real(T)
+    # for loop (n = threadidx; n < inds; n+=nthreads)
+    # three nested for loops hidden in one
+    # it is like flattening the cartesian product and then parallelizing over it
     @inbounds for n ∈ threadidx:nthreads:length(inds)
+        # caresian index, over ns, ns, ns (2M, 2M,2M )
         I = inds[n]
+        # index in the local grid 
+        # inds_start is offset by -M
         js = Tuple(I) .+ inds_start
+        # give me a one of type Tr
         gprod = one(Tr)
         for d ∈ 1:D
-            gprod *= window_vals[I[d], d]
+            gprod *= window_vals[I[d], d] # here is the outer product
         end
         w = v * gprod
+        # no colllision because every thread has different js
+        # istart is the same of all threads but then I is offset by the threadidx
         u_local[js...] += w
     end
     nothing

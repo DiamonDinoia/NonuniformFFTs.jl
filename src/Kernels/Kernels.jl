@@ -106,6 +106,7 @@ end
 
 # Assign a cell index to a location `x`. This assumes 0 ≤ x < 2π.
 # This also returns x / Δx to avoid recomputing it later.
+# delta x is 2pi/n
 @inline function point_to_cell(x, Δx)
     r = x / Δx
     i = unsafe_trunc(Int, r)  # assumes r ≥ 0

@@ -75,8 +75,8 @@ function bench_nonuniformffts(
     end
 
     type1 = @benchmark let
-        set_points!($p, $xp)
-        exec_type1!($ûs, $p, $vp)
+        CUDA.@profile set_points!($p, $xp)
+        CUDA.@profile exec_type1!($ûs, $p, $vp)
         KA.synchronize($backend)
     end
 
@@ -388,14 +388,14 @@ function run_all_benchmarks()
     end
 
     # Real data
-    run_benchmark_nonuniformffts(T, CUDABackend(), Ns, Nps; σ, m, gpu_method = :global_memory)
-    run_benchmark_nonuniformffts(T, CUDABackend(), Ns, Nps; σ, m, gpu_method = :shared_memory)
-    run_benchmark_nonuniformffts(T, CPU(), Ns, Nps; σ, m)
+    # run_benchmark_nonuniformffts(T, CUDABackend(), Ns, Nps; σ, m, gpu_method = :global_memory)
+    # run_benchmark_nonuniformffts(T, CUDABackend(), Ns, Nps; σ, m, gpu_method = :shared_memory)
+    # run_benchmark_nonuniformffts(T, CPU(), Ns, Nps; σ, m)
 
     # Complex data
-    run_benchmark_nonuniformffts(Z, CUDABackend(), Ns, Nps; σ, m, gpu_method = :global_memory)
+    # run_benchmark_nonuniformffts(Z, CUDABackend(), Ns, Nps; σ, m, gpu_method = :global_memory)
     run_benchmark_nonuniformffts(Z, CUDABackend(), Ns, Nps; σ, m, gpu_method = :shared_memory)
-    run_benchmark_nonuniformffts(Z, CPU(), Ns, Nps; σ, m)
+    # run_benchmark_nonuniformffts(Z, CPU(), Ns, Nps; σ, m)
 
     # CuFINUFFT
     params_cufinufft = (;
@@ -405,10 +405,10 @@ function run_all_benchmarks()
     )
 
     gpu_method = 1  # global memory (GM-sort)
-    run_benchmark_cufinufft(Z, Ns, Nps; gpu_method, params_cufinufft...)
+    # run_benchmark_cufinufft(Z, Ns, Nps; gpu_method, params_cufinufft...)
 
     gpu_method = 2  # shared memory (SM)
-    run_benchmark_cufinufft(Z, Ns, Nps; gpu_method, params_cufinufft...)
+    # run_benchmark_cufinufft(Z, Ns, Nps; gpu_method, params_cufinufft...)
 
     # FINUFFT CPU
     params_finufft = (;
@@ -416,7 +416,7 @@ function run_all_benchmarks()
         spread_kerevalmeth = 1,
         tol = 1e-6,
     )
-    run_benchmark_finufft_cpu(Z, Ns, Nps; params_finufft...)
+    # run_benchmark_finufft_cpu(Z, Ns, Nps; params_finufft...)
 
     nothing
 end
